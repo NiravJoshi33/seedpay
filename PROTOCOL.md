@@ -159,7 +159,29 @@ After both extended handshakes are exchanged, each peer:
 
 If either side’s extended handshake does not include `"seedpay"` in `m`, the connection continues as a normal BitTorrent session without payments.
 
+#### 3.1.3 SeedPay Capability Detection
+
+From the Leecher's perspective, the handshake phase answers two questions:
+
+1. Does this peer support SeedPay?
+
+   - Yes, if `"seedpay"` is present in remote `m` map
+
+2. What options are available?
+   - If `seedpay.price_per_mb` is set → peer supports paid seeding.
+   - If `seedpay.accepts_ratio` is true → peer will also accept ratio credits.
+
+Based on this information the Leechers classifies the peer as:
+
+- Free-only (No `seedpay` entry)
+- Paid seeder (SeedPay with pricing, no ratio)
+- Hybrid seeder (SeedPay with both pricing and ratio support)
+
+Only after this handshake phase completes does the protocol move into the Payment Submission Phase, where Leechers create on-chain transactions and send payment proofs to seeders.
+
 ### 3.2 Payment Submission
+
+Once the handshake phase is complete and Leecher has discovered a Seeder
 
 ### 3.3 Verification
 
