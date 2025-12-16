@@ -6,6 +6,12 @@
 
 </div>
 
+> **Status**: Early Draft - Seeking Feedback
+>
+> This protocol specification is in early development. We welcome feedback, criticism, and contributions from BitTorrent developers, crypto builders, P2P experts, and the broader community.
+>
+> See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to provide feedback.
+
 ## Abstract
 
 SeedPay is an open payment protocol that enables BitTorrent seeders to earn cryptocurrency for sharing files, while giving leechers two paths for accessing the content: pay seeders directly with stablecoins (i.g. USDC), or earn ratio credits by seeding other torrents.
@@ -251,8 +257,6 @@ The `payment_proof` message has the following JSON structure (sent as the payloa
 
 A Seeder that receives a `payment_proof` MUST NOT start sending pieces yet. Instead, it proceeds to the Verification Phase, where it independently validates the payment on‑chain before unchoking the Leecher and opening a paid session.
 
-Here’s a ready‑to-paste section for the next part: **verification**.
-
 ### 3.3 Verification Phase
 
 In the verification phase, the Seeder independently checks the on‑chain payment before opening a paid session. The Seeder treats the blockchain as the source of truth and MUST NOT rely solely on the `payment_proof` contents.
@@ -424,3 +428,88 @@ If the Seeder’s handshake advertised `accepts_ratio = true`, the client MAY co
 - If `prepaid_balance` is exhausted but the Leecher presents valid ratio credits, the Seeder may continue serving pieces and decrement ratio credits instead of token balance.
 
 This design allows the same Data Transfer Phase to handle pure paid sessions, pure ratio‑based sessions, or hybrid sessions without modifying the underlying BitTorrent wire protocol.
+
+## 4. Ratio Credits System
+
+### 4.1 Overview
+
+_[Draft/TBD - This section will detail the ratio credits mechanism]_
+
+Ratio credits allow leechers to earn access to paid seeders by seeding other torrents, creating a circular economy within the SeedPay network.
+
+### 4.2 Credit Earning
+
+_[Draft/TBD - How leechers earn credits by seeding]_
+
+### 4.3 Credit Spending
+
+_[Draft/TBD - How credits are spent and verified]_
+
+### 4.4 Credit Transfer and Verification
+
+_[Draft/TBD - On-chain or off-chain credit ledger, verification mechanisms]_
+
+## 5. Security Considerations
+
+### 5.1 Payment Verification
+
+_[Draft/TBD - Security considerations for on-chain payment verification, replay attacks, etc.]_
+
+### 5.2 Peer Authentication
+
+_[Draft/TBD - How to prevent peer_id spoofing, Sybil attacks]_
+
+### 5.3 Economic Attacks
+
+_[Draft/TBD - Mitigations for payment fraud, double-spending attempts, etc.]_
+
+### 5.4 Privacy Considerations
+
+_[Draft/TBD - Privacy implications of on-chain payments, peer_id linking, etc.]_
+
+## 6. Implementation Notes
+
+### 6.1 Blockchain Integration
+
+_[Draft/TBD - Specific implementation details for Solana integration, transaction construction, RPC usage]_
+
+### 6.2 Client Compatibility
+
+_[Draft/TBD - How to implement SeedPay as a BitTorrent client extension, backward compatibility testing]_
+
+### 6.3 Performance Considerations
+
+_[Draft/TBD - Latency implications, RPC rate limits, session management overhead]_
+
+### 6.4 Error Handling
+
+_[Draft/TBD - Common failure modes, retry strategies, connection recovery]_
+
+## 7. Future Extensions
+
+### 7.1 Multi-Chain Support
+
+_[Draft/TBD - Extending to other blockchains beyond Solana]_
+
+### 7.2 Advanced Payment Models
+
+_[Draft/TBD - Pay-per-piece, subscription models, etc.]_
+
+### 7.3 Reputation Systems
+
+_[Draft/TBD - Seeder reputation, leecher trust scores]_
+
+## 8. References
+
+### 8.1 BitTorrent Protocol Specifications
+
+- BEP 3: [The BitTorrent Protocol Specification](https://www.bittorrent.org/beps/bep_0003.html)
+- BEP 10: [Extension Protocol](https://www.bittorrent.org/beps/bep_0010.html)
+
+### 8.2 Related Work
+
+_[Draft/TBD - References to related protocols, research papers, etc.]_
+
+---
+
+**Note**: Sections marked as "Draft/TBD" are placeholders for future specification work. Contributions and feedback on these areas are especially welcome.
