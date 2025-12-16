@@ -158,3 +158,9 @@ After both extended handshakes are exchanged, each peer:
 - parses the remote `seedpay` object (if present) to learn the counterparty's wallet, pricing, and ratio policy.
 
 If either side’s extended handshake does not include `"seedpay"` in `m`, the connection continues as a normal BitTorrent session without payments.
+
+### 3.2 Payment Submission
+
+### 3.3 Verification
+
+### 3.4 Data Transfer
