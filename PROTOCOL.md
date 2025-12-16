@@ -251,6 +251,101 @@ The `payment_proof` message has the following JSON structure (sent as the payloa
 
 A Seeder that receives a `payment_proof` MUST NOT start sending pieces yet. Instead, it proceeds to the Verification Phase, where it independently validates the payment on‑chain before unchoking the Leecher and opening a paid session.
 
-### 3.3 Verification
+Here’s a ready‑to-paste section for the next part: **verification**.
+
+### 3.3 Verification Phase
+
+In the verification phase, the Seeder independently checks the on‑chain payment before opening a paid session. The Seeder treats the blockchain as the source of truth and MUST NOT rely solely on the `payment_proof` contents.
+
+#### 3.3.1 On‑Chain Lookup
+
+Upon receiving a `payment_proof` message, the Seeder performs a read‑only lookup on the configured chain using the provided `tx_signature`. The Seeder MUST:
+
+1. Fetch the transaction by `tx_signature` from a trusted RPC endpoint.
+2. Reject the proof if the transaction cannot be found or has not yet reached at least **confirmed** status.
+3. Parse the transaction to locate:
+   - The token transfer instruction for the agreed token (e.g. USDC)
+   - The sender and recipient accounts
+   - The transferred amount
+   - Any memo instruction attached to the transaction
+
+If any of these steps fail (e.g. malformed transaction, missing token transfer, missing memo), the Seeder MUST treat the payment as invalid.
+
+#### 3.3.2 Validation Rules
+
+A payment proof is considered **valid** only if all of the following checks pass:
+
+1. **Recipient check**
+   - The recipient of the token transfer MUST equal the Seeder’s configured `wallet` from the handshake.
+2. **Amount check**
+   - The transferred amount MUST be greater than or equal to the Seeder’s `min_prepayment`.
+   - The Seeder MAY also enforce a maximum or minimum useful amount for its own policy.
+3. **Token check**
+   - The transfer MUST be in the expected token (e.g. USDC) and on the expected chain.
+4. **Memo binding check**
+   - The transaction MUST contain a memo whose decoded JSON matches the SeedPay memo format:
+     ```json
+     {
+       "protocol": "seedpay",
+       "version": "1.0",
+       "from_peer_id": "<leecher-peer-id>",
+       "to_peer_id": "<seeder-peer-id>",
+       "nonce": 1702700000000
+     }
+     ```
+   - `protocol` MUST equal `"seedpay"` and `version` MUST match a version the Seeder supports.
+   - `from_peer_id` MUST equal the Leecher’s `peer_id` observed on this connection.
+   - `to_peer_id` MUST equal the Seeder’s own `peer_id`.
+5. **Freshness / replay protection**
+   - The Seeder MUST ensure the transaction is recent: `nonce` or the transaction’s block time MUST be within an acceptable window (e.g. 5–10 minutes) to prevent reuse of old payments.
+   - The Seeder MUST maintain a set of already‑consumed transaction signatures and reject any payment proof that references a previously accepted `tx_signature`.
+6. **Error‑free execution**
+   - The transaction’s metadata MUST indicate success; any failed or reverted transaction MUST be treated as invalid.
+
+If any validation step fails, the Seeder MUST reject the payment.
+
+#### 3.3.3 Seeder Response
+
+After running the validation checks, the Seeder responds over the SeedPay extension channel.
+
+**On success**, the Seeder:
+
+1. Creates a **payment session** associated with the Leecher’s `peer_id` and this connection, initializing:
+   - `prepaid_balance` = verified token amount
+   - `bytes_downloaded` = 0
+   - `price_per_mb` = value from the handshake
+   - `expires_at` = current time + session lifetime (implementation‑defined)
+2. Sends a `payment_confirmed` message to the Leecher:
+
+```json
+{
+  "type": "payment_confirmed",
+  "confirmed": true,
+  "balance": 0.01,
+  "price_per_mb": 0.0001,
+  "expires_at": 1702703600000
+}
+```
+
+3. **Unchokes** the Leecher on the BitTorrent wire, allowing piece requests to proceed.
+
+**On failure**, the Seeder:
+
+1. Sends a `payment_rejected` message:
+
+```json
+{
+  "type": "payment_rejected",
+  "confirmed": false,
+  "reason": "tx_not_found" | "tx_failed" | "wrong_recipient" |
+            "insufficient_amount" | "memo_mismatch" | "replayed_tx" |
+            "expired"
+}
+```
+
+2. Keeps the Leecher **choked**, so no paid pieces are sent for this session.
+3. MAY allow the Leecher to retry with a new payment, or MAY close the connection according to local policy.
+
+Once a payment has been confirmed and a payment session created, the protocol transitions to the **Data Transfer Phase**, where each piece sent is accounted against the Leecher’s prepaid balance.
 
 ### 3.4 Data Transfer
