@@ -349,3 +349,78 @@ After running the validation checks, the Seeder responds over the SeedPay extens
 Once a payment has been confirmed and a payment session created, the protocol transitions to the **Data Transfer Phase**, where each piece sent is accounted against the Leecher’s prepaid balance.
 
 ### 3.4 Data Transfer
+
+After a payment session is established, the Seeder begins serving pieces to the Leecher while decrementing the Leecher's prepaid balance. This phase reuses the normal BitTorrent request/response messages and adds only local accounting and a few SeedPay control messages.
+
+#### 3.4.1 Mapping Pieces to Cost
+
+SeedPay doesn't modify the BitTorrent wire messages used for data transfer (`request`, `piece`, `cancel`). Instead the Seeder:
+
+- observes each `request` message from the Leecher
+- computes the byte length of the requested block
+- converts that length into monetary cost using the agreed `price_per_mb` from the handshake:
+
+$$
+\text{cost} = \frac{\text{bytes}}{1024 \times 1024} \times \text{price\_per\_mb}
+$$
+
+The Seeder maintains, per payment session:
+
+- `prepaid_balance` (remaining paid amount, in token units)
+- `bytes_downloaded` (cumulative bytes served under this session)
+- `price_per_mb` (agreed rate)
+
+A Seeder MAY track usage either on `request` or on successful `piece` send.
+
+#### 3.4.2 Serving Requests Under Balance Constraints
+
+For each upcoming `request(index, begin, length)` from the Leecher, the Seeder performs:
+
+1. Look up the associated payment session for this `peer_id` and connection.
+   - If no active session exists, the Seeder MUST keep the peer chocked and MUST NOT serve paid pieces.
+2. Compute the monetary cost of serving this block as described above.
+3. Check whether `prepaid_balance >= cost`
+
+If `prepaid_balance` is sufficient:
+
+- The Seeder decrements `prepaid_balance` by `cost`.
+- Increments `bytes downloaded` by `length`.
+- Sends the corresponding `piece` message as in standard BitTorrent.
+
+If `prepaid_balance` is not sufficient:
+
+- The Seeder may send a `balance_low` control message over the SeedPay extension:
+
+```json
+{
+  "type": "balance_low",
+  "remaining": 0.0003,
+  "estimated_remaining_mb": 3.0
+}
+```
+
+- The Seeder SHOULD choke the Leecher (normal BitTorrent `choke` state) to prevent further paid downloads until the balance is topped up or a new payment proof is received.
+
+The Leecher, upon receiving `balance_low` or observing stalled progress, MAY initiate another Payment Submission Phase with a fresh transaction and `payment_proof`.
+
+#### 3.4.3 Session Lifetime and Expiry
+
+Payment sessions are not intended to last indefinitely. A Seeder SHOULD treat a session as expired if any of the following conditions hold:
+
+- `expires_at` (set during payment_confirmed) is in the past.
+- The connection is closed or idle for longer than an implementation‑defined timeout.
+- A new `payment_proof` is received for the same peer_id and torrent, in which case the Seeder MAY close the old session and open a new one with the new balance.
+
+On expiry, the Seeder:
+
+- Discards the session state (balance, usage counters).
+- Keeps or reverts to the choked state for that peer.
+- MAY continue to serve as a free seeder (if its local policy allows) or close the connection.
+
+#### 3.4.4 Interaction with Ratio Credits
+
+If the Seeder’s handshake advertised `accepts_ratio = true`, the client MAY combine balance checks with a separate ratio credit check instead of strict “balance or nothing” behavior:
+
+- If `prepaid_balance` is exhausted but the Leecher presents valid ratio credits, the Seeder may continue serving pieces and decrement ratio credits instead of token balance.
+
+This design allows the same Data Transfer Phase to handle pure paid sessions, pure ratio‑based sessions, or hybrid sessions without modifying the underlying BitTorrent wire protocol.
