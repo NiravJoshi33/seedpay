@@ -80,9 +80,9 @@ The authors and contributors of this specification assume no liability for how t
 
 ## 🔗 Links
 
-- **GitHub**: [Repository URL - Add when published]
-- **Issues**: [GitHub Issues - Add when published]
-- **Discussions**: [GitHub Discussions - Add when published]
+- **GitHub**: [GitHub Repo](https://github.com/NiravJoshi33/seedpay)
+- **Issues**: [GitHub Issues](https://github.com/NiravJoshi33/seedpay/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/NiravJoshi33/seedpay/discussions/)
 
 ## 🙏 Acknowledgments
 
