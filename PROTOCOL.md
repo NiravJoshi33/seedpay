@@ -181,7 +181,75 @@ Only after this handshake phase completes does the protocol move into the Paymen
 
 ### 3.2 Payment Submission
 
-Once the handshake phase is complete and Leecher has discovered a Seeder
+Once the handshake phase is complete and Leecher has discovered a Seeder that advertises SeedPay support and pricing, next step is to prepay for a portion of the download. In SeedPay V1, payments are made via direct on-chains initiated by the Leecher, with the transaction bound to specific peer connection via a memo.
+
+#### 3.2.1 Pricing and Session Setup
+
+From the extended handshake, the Leecher learns the Seeder's terms:
+
+- `wallet`: on-chain wallet address that receives the funds
+- `price_per_mb`: quoted price in USDC per MB
+- `min_prepayment`: min. amount required to open a session
+- `chain`: settlement chain identifier (e.g. `"solana"`)
+
+The Leecher may also apply local policy, such as:
+
+- Max. price per MB it is willing to pay
+- Max. total spend per torrent per session
+- Preference of using ratio credits instead of payment when available
+
+If the Seeder’s advertised terms are acceptable, the Leecher computes an initial prepayment amount large enough to cover some target amount of data (for example, 50–200 MB), but at least `min_prepayment`.
+
+#### 3.2.2 Creating the On-Chain Payment
+
+To start paid session, Leecher creates and submits a token transfer transaction on the configured chain. The transaction MUST:
+
+- Transfer at least `min_prepayment` (and typically `price_per_mb \* target_mb`) of the agreed token (e.g. USDC)
+- Use the Seeder’s `wallet` as the recipient
+- Include a memo that cryptographically binds the payment to this specific SeedPay peer connection
+
+SeedPay defines the memo payload as a JSON object serialized to UTF‑8:
+
+```json
+{
+  "protocol": "seedpay",
+  "version": "1.0",
+  "from_peer_id": "<leecher-peer-id>",
+  "to_peer_id": "<seeder-peer-id>",
+  "nonce": 1702700000000
+}
+```
+
+- `protocol` and `version` identify the memo as a SeedPay payment
+- `from_peer_id` is the Leecher’s BitTorrent `peer_id` from the wire handshake
+- `to_peer_id` is the Seeder’s `peer_id` from the wire handshake
+- `nonce` is a timestamp or random value used to ensure freshness and prevent replay
+
+The Leecher signs and submits the transaction directly to blockchain. Once the network accepts the transaction and returns the transaction signature, the Leecher should wait until the transaction reaches at least confirmed status before proceeding.
+
+#### 3.2.3 Sending the Payment Proof to the Seeder
+
+After the transaction is confirmed on‑chain, the Leecher sends a payment proof to the Seeder over the SeedPay extension channel. This is the first SeedPay data message (as opposed to handshake metadata).
+
+The `payment_proof` message has the following JSON structure (sent as the payload of an extended message using the negotiated SeedPay extension ID):
+
+```json
+{
+  "type": "payment_proof",
+  "tx_signature": "<base58-or-hex-signature>",
+  "amount": 0.01,
+  "from_peer_id": "<leecher-peer-id>",
+  "to_peer_id": "<seeder-peer-id>",
+  "timestamp": 1702700000000
+}
+```
+
+- `tx_signature`: the blockchain transaction signature of the prepayment
+- `amount`: the amount the Leecher believes it has paid (for accounting and UI)
+- `from_peer_id` and `to_peer_id`: must match the values embedded in the on‑chain memo
+- `timestamp`: time at which the proof was created (used for freshness checks)
+
+A Seeder that receives a `payment_proof` MUST NOT start sending pieces yet. Instead, it proceeds to the Verification Phase, where it independently validates the payment on‑chain before unchoking the Leecher and opening a paid session.
 
 ### 3.3 Verification
 
