@@ -6,9 +6,16 @@
 
 </div>
 
-> **Status**: Early Draft - Seeking Feedback
+> ⚠️ **Status: Pre-Alpha / Request For Comments (RFC)**
 >
-> This protocol specification is in early development. We welcome feedback, criticism, and contributions from BitTorrent developers, crypto builders, P2P experts, and the broader community.
+> This specification is a **v0.1 draft** released to gather architectural feedback.
+> Based on initial community review, we are actively refactoring three core components for the v0.2 spec:
+>
+> 1. **Privacy (Anti-Doxxing)**: We are replacing raw PeerIDs in on-chain memos with **Ephemeral Session Keys**. This ensures that public observers cannot link a user's IP address (swarm activity) to their permanent wallet history.
+> 2. **Trust Model**: We are moving from _Atomic Prepayment_ to **Unidirectional State Channels** (or probabilistic micropayments). This solves the "Fair Exchange" problem (preventing seeders from taking funds without sending data) and reduces RPC latency.
+> 3. **Sybil Resistance**: The "Ratio Credits" system is being redesigned to prevent local Sybil farming, likely moving toward a "Web of Trust" or "Pay-to-Play" closed loop.
+>
+> **Current implementation is for research only. Contributions on these specific issues are welcome.**
 >
 > See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to provide feedback.
 
