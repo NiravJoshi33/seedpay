@@ -12,9 +12,9 @@
 >
 > **What's New in v0.2:**
 >
-> 1. ✅ **Privacy Protection Implemented**: Ephemeral Session Keys (ECDH-based) replace raw PeerIDs in on-chain memos, preventing linkage between IP addresses and wallet addresses.
-> 2. ✅ **Simplified Payment Model**: Direct on-chain payments for V1 (no channels needed given Solana's ~$0.00025 transaction costs).
-> 3. 🚧 **Ratio Credits (TBD)**: System redesign in progress to prevent Sybil attacks and ensure fairness.
+> 1. **Privacy Protection Implemented**: Ephemeral Session Keys (ECDH-based) replace raw PeerIDs in on-chain memos, preventing linkage between IP addresses and wallet addresses.
+> 2. **Simplified Payment Model**: Payment channels with streaming micropayments for V1.
+> 3. **Ratio Credits (TBD)**: System redesign in progress to prevent Sybil attacks and ensure fairness.
 >
 > **This is research software. Do not use in production.**
 >
@@ -191,11 +191,13 @@ Based on this information the Leechers classifies the peer as:
 - Paid seeder (SeedPay with pricing, no ratio)
 - Hybrid seeder (SeedPay with both pricing and ratio support)
 
-Only after this handshake phase completes does the protocol move into the Payment Submission Phase, where Leechers establish ephemeral session keys and create on-chain transactions.
+Only after this handshake phase completes does the protocol move into the Payment Channel Phase, where Leechers establish ephemeral session keys and open payment channels for streaming micropayments.
 
-### 3.2 Payment Submission
+### 3.2 Payment Channel Setup
 
-Once the handshake phase is complete and the Leecher has discovered a Seeder advertising SeedPay support, the next step is to establish a cryptographically-bound payment session. **V0.2 uses Ephemeral Session Keys to ensure privacy**—the on-chain payment contains no peer_id or IP address information that could link wallet activity to download behavior.
+Once the handshake phase is complete and the Leecher has discovered a Seeder advertising SeedPay support, the next step is to establish a cryptographically-bound payment channel. **V0.2 uses Ephemeral Session Keys to ensure privacy**—the on-chain channel opening contains no peer_id or IP address information that could link wallet activity to download behavior.
+
+Payment channels enable streaming micropayments: the Leecher deposits funds into an escrow account, then signs off-chain payment checks as data is downloaded. The Seeder can submit the final check to claim funds, or the Leecher can close the channel after a timeout period.
 
 #### 3.2.1 Ephemeral Key Exchange (ECDH)
 
@@ -265,13 +267,13 @@ This context string provides:
 - **Unlinkability**: Blockchain observers see only `Hash(Session_UUID)` in the memo—they cannot reverse it or link it to peer activity.
 - **Replay Protection**: Each session has a unique `Session_UUID`; old payment proofs cannot be reused.
 
-#### 3.2.2 Pricing and Session Setup
+#### 3.2.2 Pricing and Channel Setup
 
 From the extended handshake, the Leecher learns the Seeder's terms:
 
 - `wallet`: on-chain wallet address that receives the funds
 - `price_per_mb`: quoted price in USDC per MB
-- `min_prepayment`: minimum amount required to open a session
+- `min_prepayment`: minimum amount required to open a channel
 - `chain`: settlement chain identifier (e.g. `"solana"`)
 
 The Leecher may also apply local policy, such as:
@@ -280,19 +282,48 @@ The Leecher may also apply local policy, such as:
 - Maximum total spend per torrent per session
 - Preference for using ratio credits instead of payment when available
 
-If the Seeder's advertised terms are acceptable, the Leecher computes an initial prepayment amount large enough to cover some target amount of data (for example, 50–200 MB), but at least `min_prepayment`.
+If the Seeder's advertised terms are acceptable, the Leecher computes an initial channel deposit amount large enough to cover some target amount of data (for example, 50–200 MB), but at least `min_prepayment`.
 
-#### 3.2.3 Creating the On-Chain Payment
+#### 3.2.3 Opening Payment Channel
 
-To start a paid session, the Leecher creates and submits a token transfer transaction on the configured chain. The transaction MUST:
+To start a paid session, the Leecher opens a unidirectional payment channel by depositing funds into an escrow account controlled by a smart contract. The channel opening transaction MUST:
 
-- Transfer at least `min_prepayment` (typically `price_per_mb × target_mb`) of the agreed token (e.g. USDC)
-- Use the Seeder's `wallet` as the recipient
-- Include a memo containing the **hash of the Session UUID** (not raw peer_ids)
+- Deposit at least `min_prepayment` (typically `price_per_mb × target_mb`) of the agreed token (e.g. USDC) into the escrow
+- Include a channel identifier derived from the Session_UUID for privacy
+- Include metadata binding the channel to this specific session
+
+**Channel Opening Transaction Structure:**
+
+The transaction creates a payment channel with the following properties:
+
+```
+channel_id = SHA-256(
+  leecher_wallet_address ||
+  seeder_wallet_address ||
+  timestamp ||
+  nonce
+)
+
+channel_state = {
+  leecher: <leecher_wallet_address>
+  seeder: <seeder_wallet_address>
+  escrow: <escrow_account_address>
+  deposited: <amount_in_tokens>
+  channel_id: <channel_id>
+  created_at: <blockchain_timestamp>
+  timeout: <created_at + timeout_period>
+  last_nonce: 0
+  status: "Open"
+}
+```
+
+**Channel ID Derivation:**
+
+The `channel_id` MUST be deterministically derivable from on-chain data (wallet addresses, timestamp, nonce) so that the smart contract can create and lookup channels without requiring the Session_UUID. The session binding for privacy is handled separately via the memo's `session_hash` field (see Section 3.3.2).
 
 **Memo Format (Privacy-Preserving):**
 
-The memo is a simple JSON object containing only the opaque session identifier:
+The channel opening transaction includes a memo containing only the opaque session identifier:
 
 ```json
 {
@@ -316,67 +347,251 @@ Where:
 - Each session has a unique hash (unlinkable across sessions)
 - Blockchain observers cannot determine what torrent is being downloaded
 
-The Leecher signs and submits the transaction directly to the blockchain. Once the network accepts the transaction and returns the transaction signature, the Leecher SHOULD wait until the transaction reaches at least **confirmed** status before proceeding.
+The Leecher signs and submits the channel opening transaction to the blockchain. Once the network accepts the transaction and returns the transaction signature, the Leecher SHOULD wait until the transaction reaches at least **confirmed** status before proceeding.
 
-#### 3.2.4 Sending the Payment Proof to the Seeder
+#### 3.2.4 Channel Opening Notification
 
-After the transaction is confirmed on-chain, the Leecher sends a payment proof to the Seeder over the SeedPay extension channel. This message contains only the transaction signature—the Seeder will independently verify the payment on-chain.
+After the channel opening transaction is confirmed on-chain, the Leecher sends a channel opening notification to the Seeder over the SeedPay extension channel. This message contains the transaction signature—the Seeder will independently verify the channel on-chain.
 
 ```json
 {
-  "type": "payment_proof",
-  "tx_signature": "5Kn8yF...",
+  "type": "channel_opened",
+  "tx_signature": "<transaction_signature>",
+  "channel_id": "<channel_identifier>",
   "amount": 0.01,
   "timestamp": 1702700000000
 }
 ```
 
-- `tx_signature`: the blockchain transaction signature (Solana base58 format)
-- `amount`: the amount paid (for UI/logging purposes only, not trusted by Seeder)
-- `timestamp`: when the proof was created (for freshness checks)
+- `tx_signature`: the blockchain transaction signature of the channel opening
+- `channel_id`: the channel identifier (for reference, not trusted)
+- `amount`: the deposited amount (for UI/logging purposes only, not trusted by Seeder)
+- `timestamp`: when the notification was created (for freshness checks)
 
-**Important:** The Seeder MUST NOT rely on the `amount` field or any other client-provided data. All validation is done against the on-chain transaction.
+**Important:** The Seeder MUST NOT rely on the `amount` field or any other client-provided data. All validation is done against the on-chain channel state.
 
-A Seeder that receives a `payment_proof` MUST NOT start sending pieces yet. Instead, it proceeds to the Verification Phase (Section 3.3).
+A Seeder that receives a `channel_opened` message MUST NOT start sending pieces yet. Instead, it proceeds to the Verification Phase (Section 3.3) to verify the channel on-chain.
+
+#### 3.2.5 Streaming Off-Chain Payments
+
+Once the payment channel is verified and open, the Leecher can stream micropayments by signing off-chain payment checks. As data is downloaded, the Leecher signs payment checks that authorize the Seeder to claim increasing amounts from the escrow.
+
+**Payment Check Structure:**
+
+Each payment check is a signed message containing:
+
+```json
+{
+  "channel_id": "<channel_identifier>",
+  "amount": 0.005,
+  "nonce": 1,
+  "signature": "<ed25519_signature>"
+}
+```
+
+Where:
+
+- `channel_id`: identifies which payment channel this check belongs to
+- `amount`: cumulative amount authorized (in token units, e.g. USDC)
+- `nonce`: monotonically increasing sequence number (prevents replay)
+- `signature`: Ed25519 signature over `channel_id || amount || nonce` using the Leecher's wallet key
+
+**Payment Check Signing:**
+
+The payment check MUST use structured encoding to prevent ambiguity and collision attacks:
+
+```
+// Option 1: Structured binary encoding (recommended)
+payment_check_data = {
+  channel_id: [u8; 32],
+  amount: u64,
+  nonce: u64
+}
+message = serialize(payment_check_data)  // e.g., Borsh, CBOR, or Protocol Buffers
+message_hash = SHA-256(message)
+signature = ed25519_sign(leecher_private_key, message_hash)
+
+// Option 2: Delimited string encoding (alternative)
+message = channel_id + ":" + amount.to_string() + ":" + nonce.to_string()
+message_hash = SHA-256(message)
+signature = ed25519_sign(leecher_private_key, message_hash)
+```
+
+**Important:** The signature MUST be computed over a hash of the message, not the raw message, to ensure consistent signature length and prevent length extension attacks.
+
+**Sending Payment Checks:**
+
+The Leecher sends payment checks periodically or when the Seeder requests an update. Payment checks are sent over the SeedPay extension channel:
+
+**Recommended Payment Check Frequency:**
+
+- Small downloads (<100MB): Every 10MB or every 40 pieces
+- Medium downloads (100MB-1GB): Every 50MB or every 200 pieces
+- Large downloads (>1GB): Every 100MB or every 400 pieces
+
+The Leecher SHOULD send checks proactively rather than waiting for `payment_check_required` messages to minimize download interruptions.
+
+**Payment Check Message Format:**
+
+```json
+{
+  "type": "payment_check",
+  "channel_id": "<channel_identifier>",
+  "amount": 0.005,
+  "nonce": 1,
+  "signature": "<base64_encoded_signature>"
+}
+```
+
+**Payment Check Validation:**
+
+The Seeder validates each payment check:
+
+1. Verify the signature using the Leecher's public key (from channel state)
+2. Verify `nonce` is greater than the last accepted nonce for this channel
+3. Verify `amount` does not exceed the channel deposit
+4. Verify `amount` is greater than or equal to the last accepted amount
+
+If validation passes, the Seeder updates its local channel state and continues serving pieces. The Seeder stores the highest valid payment check for later submission when closing the channel.
+
+**Security Properties:**
+
+- Each check is cryptographically signed (cannot be forged)
+- Nonce prevents replay of old checks
+- Amount must be monotonically increasing
+- Seeder can only claim up to the highest valid check amount
+
+#### 3.2.6 Closing Payment Channel
+
+The payment channel can be closed in two ways: cooperative close (Seeder submits final check) or timeout close (Leecher force-closes after timeout).
+
+**Cooperative Close (Normal Case):**
+
+When the download completes or the session ends, the Seeder submits the highest valid payment check to the blockchain to claim funds:
+
+```
+close_channel(
+  channel_id: <channel_id>
+  amount: <highest_check_amount>
+  nonce: <highest_check_nonce>
+  signature: <highest_check_signature>
+)
+```
+
+The smart contract:
+
+1. Verifies the payment check signature
+2. Verifies the nonce is valid and higher than any previously closed amount
+3. Transfers `amount` from escrow to Seeder's wallet
+4. Refunds remaining balance (`deposited - amount`) to Leecher's wallet
+5. Closes the channel (marks as settled)
+
+**Timeout Close (Leecher Force-Close):**
+
+If the Seeder disappears or fails to close the channel, the Leecher can force-close after the timeout period:
+
+```
+timeout_close(
+  channel_id: <channel_id>
+)
+```
+
+The smart contract:
+
+1. Verifies the current time exceeds `channel.timeout`
+2. Refunds the entire deposit to Leecher's wallet
+3. Closes the channel
+
+**Timeout Period:**
+
+**Default Timeout Period:** 86400 seconds (24 hours)
+
+The timeout period MUST be included in the channel opening transaction and stored in the channel state. Both parties MUST agree on the timeout before channel creation.
+
+**Recommended timeout values:**
+
+- Quick downloads (< 1 hour expected): 3600 seconds (1 hour)
+- Standard downloads: 86400 seconds (24 hours)
+- Long-running channels: 604800 seconds (7 days)
+
+The timeout MUST be at least 3600 seconds (1 hour) to allow for normal session completion. The Leecher can force-close the channel after the timeout period expires, receiving a full refund of any unspent deposit.
+
+**Channel Closing Notification:**
+
+After a channel is closed (either cooperatively or via timeout), the closing party SHOULD notify the other peer:
+
+```json
+{
+  "type": "channel_closed",
+  "channel_id": "<channel_identifier>",
+  "tx_signature": "<closing_transaction_signature>",
+  "final_amount": 0.005,
+  "reason": "cooperative" | "timeout"
+}
+```
+
+This allows both parties to update their local state and clean up session information.
 
 ### 3.3 Verification Phase
 
-In the verification phase, the Seeder independently checks the on-chain payment before opening a paid session. The Seeder treats the blockchain as the source of truth and MUST NOT rely solely on the `payment_proof` contents.
+In the verification phase, the Seeder independently checks the on-chain payment channel before opening a paid session. The Seeder treats the blockchain as the source of truth and MUST NOT rely solely on the `channel_opened` message contents.
 
-#### 3.3.1 On-Chain Lookup
+#### 3.3.1 On-Chain Channel Lookup
 
-Upon receiving a `payment_proof` message, the Seeder performs a read-only lookup on the configured chain using the provided `tx_signature`. The Seeder MUST:
+Upon receiving a `channel_opened` message, the Seeder performs a read-only lookup on the configured chain using the provided `tx_signature`. The Seeder MUST:
 
 1. Fetch the transaction by `tx_signature` from a trusted RPC endpoint.
-2. Reject the proof if the transaction cannot be found or has not yet reached at least **confirmed** status.
+2. Reject if the transaction cannot be found or has not yet reached at least **confirmed** status.
 3. Parse the transaction to locate:
-   - The token transfer instruction for the agreed token (e.g. USDC)
-   - The sender and recipient accounts
-   - The transferred amount
+   - The channel creation instruction
+   - The escrow account that holds the deposited funds
+   - The deposited amount
+   - The channel state (leecher, seeder, timeout, etc.)
    - Any memo instruction attached to the transaction
 
-If any of these steps fail (e.g. malformed transaction, missing token transfer, missing memo), the Seeder MUST treat the payment as invalid.
+If any of these steps fail (e.g. malformed transaction, missing channel creation, missing memo), the Seeder MUST treat the channel as invalid.
 
-#### 3.3.2 Validation Rules
+#### 3.3.2 Channel Validation Rules
 
-A payment proof is considered **valid** only if all of the following checks pass:
+**Expected Channel State Structure (On-Chain):**
 
-1. **Recipient check**
+The smart contract MUST maintain channel state with the following structure:
 
-   - The recipient of the token transfer MUST equal the Seeder's configured `wallet` from the handshake.
+```
+channel_state = {
+  leecher: <wallet_address>,        // Leecher's wallet address
+  seeder: <wallet_address>,          // Seeder's wallet address
+  escrow: <escrow_account_address>,  // Token account holding deposited funds
+  deposited: <u64>,                  // Amount deposited (in token units)
+  channel_id: <[u8; 32]>,            // Unique channel identifier
+  created_at: <i64>,                 // Unix timestamp of channel creation
+  timeout: <i64>,                    // created_at + timeout_period
+  last_nonce: <u64>,                 // Highest nonce from closed checks (0 if not closed)
+  status: <ChannelStatus>            // Open | Closed | Timedout
+}
 
-2. **Amount check**
+ChannelStatus = "Open" | "Closed" | "Timedout"
+```
 
-   - The transferred amount MUST be greater than or equal to the Seeder's `min_prepayment`.
+A payment channel is considered **valid** only if all of the following checks pass:
+
+1. **Channel state check**
+
+   - The channel MUST exist on-chain and be in an "Open" state.
+   - The Seeder's wallet address in the channel state MUST equal the Seeder's configured `wallet` from the handshake.
+
+2. **Deposit amount check**
+
+   - The deposited amount MUST be greater than or equal to the Seeder's `min_prepayment`.
    - The Seeder MAY also enforce a maximum amount for its own policy.
 
 3. **Token check**
 
-   - The transfer MUST be in the expected token (e.g. USDC SPL token) and on the expected chain.
+   - The escrow MUST hold the expected token (e.g. USDC) and on the expected chain.
 
 4. **Memo binding check (Privacy-Preserving)**
 
-   - The transaction MUST contain a memo whose decoded JSON matches the SeedPay memo format:
+   - The channel opening transaction MUST contain a memo whose decoded JSON matches the SeedPay memo format:
      ```json
      {
        "protocol": "seedpay",
@@ -388,17 +603,17 @@ A payment proof is considered **valid** only if all of the following checks pass
    - `protocol` MUST equal `"seedpay"` and `version` MUST match a version the Seeder supports.
    - **Session Binding**: The Seeder computes `expected_hash = SHA-256(Session_UUID)` using the Session_UUID derived during ECDH key exchange (Section 3.2.1).
    - The `session_hash` field in the memo MUST equal `expected_hash`.
-   - This proves the payment is bound to THIS specific connection without revealing peer_id or IP information.
+   - This proves the channel is bound to THIS specific connection without revealing peer_id or IP information.
 
 5. **Freshness / replay protection**
 
-   - The Seeder MUST ensure the transaction is recent: `nonce` or the transaction's block time MUST be within an acceptable window (e.g. 5–10 minutes) to prevent reuse of old payments.
-   - The Seeder MUST maintain a set of already-consumed transaction signatures and reject any payment proof that references a previously accepted `tx_signature`.
+   - The Seeder MUST ensure the channel opening is recent: `nonce` or the transaction's block time MUST be within an acceptable window (e.g. 5–10 minutes) to prevent reuse of old channels.
+   - The Seeder MUST maintain a set of already-used channel identifiers and reject any channel that has already been used for a session.
 
 6. **Error-free execution**
    - The transaction's metadata MUST indicate success; any failed or reverted transaction MUST be treated as invalid.
 
-If any validation step fails, the Seeder MUST reject the payment.
+If any validation step fails, the Seeder MUST reject the channel.
 
 #### 3.3.3 Seeder Response
 
@@ -408,20 +623,24 @@ After running the validation checks, the Seeder responds over the SeedPay extens
 
 1. Creates a **payment session** associated with this connection, initializing:
 
-   - `prepaid_balance` = verified token amount
+   - `channel_id` = verified channel identifier
+   - `channel_deposit` = verified deposited amount
+   - `last_check_nonce` = 0
+   - `last_check_amount` = 0
    - `bytes_downloaded` = 0
    - `price_per_mb` = value from the handshake
-   - `expires_at` = current time + session lifetime (implementation-defined, e.g. 1 hour)
+   - `channel_timeout` = timeout from channel state
 
-2. Sends a `payment_confirmed` message to the Leecher:
+2. Sends a `channel_confirmed` message to the Leecher:
 
    ```json
    {
-     "type": "payment_confirmed",
+     "type": "channel_confirmed",
      "confirmed": true,
-     "balance": 0.01,
+     "channel_id": "<channel_identifier>",
+     "deposit": 0.01,
      "price_per_mb": 0.0001,
-     "expires_at": 1702703600000
+     "timeout": 1702703600000
    }
    ```
 
@@ -429,28 +648,28 @@ After running the validation checks, the Seeder responds over the SeedPay extens
 
 **On failure**, the Seeder:
 
-1. Sends a `payment_rejected` message:
+1. Sends a `channel_rejected` message:
 
    ```json
    {
-     "type": "payment_rejected",
+     "type": "channel_rejected",
      "confirmed": false,
-     "reason": "tx_not_found" | "tx_failed" | "wrong_recipient" |
-               "insufficient_amount" | "session_mismatch" | "replayed_tx" |
-               "expired"
+     "reason": "tx_not_found" | "tx_failed" | "wrong_seeder" |
+               "insufficient_deposit" | "session_mismatch" | "replayed_channel" |
+               "expired" | "invalid_channel_state"
    }
    ```
 
    Note: `"session_mismatch"` replaces `"memo_mismatch"` from v0.1 to reflect the new ECDH-based binding.
 
 2. Keeps the Leecher **choked**, so no paid pieces are sent for this session.
-3. MAY allow the Leecher to retry with a new payment, or MAY close the connection according to local policy.
+3. MAY allow the Leecher to retry with a new channel opening, or MAY close the connection according to local policy.
 
-Once a payment has been confirmed and a payment session created, the protocol transitions to the **Data Transfer Phase** (Section 3.4).
+Once a channel has been confirmed and a payment session created, the protocol transitions to the **Data Transfer Phase** (Section 3.4).
 
 ### 3.4 Data Transfer
 
-After a payment session is established, the Seeder begins serving pieces to the Leecher while decrementing the Leecher's prepaid balance. This phase reuses the normal BitTorrent request/response messages and adds only local accounting and a few SeedPay control messages.
+After a payment session is established, the Seeder begins serving pieces to the Leecher while tracking payment checks. This phase reuses the normal BitTorrent request/response messages and adds only local accounting and payment check validation.
 
 #### 3.4.1 Mapping Pieces to Cost
 
@@ -461,18 +680,21 @@ SeedPay doesn't modify the BitTorrent wire messages used for data transfer (`req
 - converts that length into monetary cost using the agreed `price_per_mb` from the handshake:
 
 $$
-\text{cost} = \frac{\text{bytes}}{1024 \times 1024} \times \text{pricePerMB}
+\text{cost} = \frac{\text{bytes}}{1024 \times 1024} \times \text{price\_per\_mb}
 $$
 
 The Seeder maintains, per payment session:
 
-- `prepaid_balance` (remaining paid amount, in token units)
+- `channel_id` (payment channel identifier)
+- `channel_deposit` (total amount locked in escrow)
+- `last_check_nonce` (highest nonce from valid payment checks)
+- `last_check_amount` (highest amount authorized by valid payment checks)
 - `bytes_downloaded` (cumulative bytes served under this session)
 - `price_per_mb` (agreed rate)
 
 A Seeder MAY track usage either on `request` or on successful `piece` send. For accuracy, tracking on successful `piece` send is RECOMMENDED.
 
-#### 3.4.2 Serving Requests Under Balance Constraints
+#### 3.4.2 Serving Requests Under Payment Check Constraints
 
 For each upcoming `request(index, begin, length)` from the Leecher, the Seeder performs:
 
@@ -482,50 +704,81 @@ For each upcoming `request(index, begin, length)` from the Leecher, the Seeder p
 
 2. Compute the monetary cost of serving this block as described above.
 
-3. Check whether `prepaid_balance >= cost`
+3. Compute the cumulative cost: `cumulative_cost = (bytes_downloaded + length) / (1024 * 1024) * price_per_mb`
 
-If `prepaid_balance` is sufficient:
+4. Check whether `last_check_amount >= cumulative_cost`
 
-- The Seeder decrements `prepaid_balance` by `cost`.
-- Increments `bytes_downloaded` by `length`.
+If `last_check_amount` is sufficient:
+
+- The Seeder increments `bytes_downloaded` by `length`.
 - Sends the corresponding `piece` message as in standard BitTorrent.
 
-If `prepaid_balance` is not sufficient:
+If `last_check_amount` is not sufficient:
 
-- The Seeder MAY send a `balance_low` control message over the SeedPay extension:
+- The Seeder MAY send a `payment_check_required` control message over the SeedPay extension:
 
   ```json
   {
-    "type": "balance_low",
-    "remaining": 0.0003,
-    "estimated_remaining_mb": 3.0
+    "type": "payment_check_required",
+    "required_amount": 0.005,
+    "current_check_amount": 0.003,
+    "estimated_remaining_mb": 20.0
   }
   ```
 
-- The Seeder SHOULD choke the Leecher (normal BitTorrent `choke` state) to prevent further paid downloads until the balance is topped up or a new payment proof is received.
+- **Handling In-Flight Payment Checks:** Before choking due to insufficient payment, the Seeder SHOULD wait a short grace period (e.g., 5 seconds) to allow any in-flight payment checks to arrive. This prevents unnecessary choke/unchoke cycles when the Leecher is already sending payment checks proactively.
 
-The Leecher, upon receiving `balance_low` or observing stalled progress, MAY initiate another Payment Submission Phase with a fresh transaction and `payment_proof`. The new payment will use the same `Session_UUID` (derived from the same ECDH keys for this connection), allowing the Seeder to top up the existing session balance.
+- After the grace period, if no valid payment check has been received, the Seeder SHOULD choke the Leecher (normal BitTorrent `choke` state) to prevent further paid downloads until a new payment check is received.
 
-#### 3.4.3 Session Lifetime and Expiry
+The Leecher, upon receiving `payment_check_required` or observing stalled progress, SHOULD send a new payment check with an increased amount covering the cumulative cost of data served so far.
+
+#### 3.4.3 Payment Check Processing
+
+When the Seeder receives a `payment_check` message during data transfer:
+
+1. Validate the payment check signature using the Leecher's public key from the channel state.
+
+2. Verify the nonce is greater than `last_check_nonce` (prevents replay).
+
+3. Verify the amount is greater than or equal to `last_check_amount` (must be monotonically increasing).
+
+4. Verify the amount does not exceed `channel_deposit` (cannot authorize more than deposited).
+
+If all validations pass:
+
+- Update `last_check_nonce` = check nonce
+- Update `last_check_amount` = check amount
+- If the Seeder was choked due to insufficient payment, unchoke the Leecher
+- Continue serving pieces
+
+If validation fails:
+
+- Reject the payment check
+- Keep the Leecher choked
+- MAY send an error message indicating the reason for rejection
+
+#### 3.4.4 Session Lifetime and Channel Closure
 
 Payment sessions are not intended to last indefinitely. A Seeder SHOULD treat a session as expired if any of the following conditions hold:
 
-- `expires_at` (set during payment_confirmed) is in the past.
+- The channel timeout has been reached (allowing Leecher to force-close).
 - The connection is closed or idle for longer than an implementation-defined timeout.
-- The ephemeral keys have been deleted (session cannot be verified for new payments).
+- The ephemeral keys have been deleted (session cannot be verified for new channels).
 
-On expiry, the Seeder:
+When a session ends (either normally or due to expiry), the Seeder SHOULD:
 
-- Discards the session state (balance, usage counters).
-- Deletes the ephemeral secret key (ensures forward secrecy).
-- Keeps or reverts to the choked state for that peer.
-- MAY continue to serve as a free seeder (if its local policy allows) or close the connection.
+1. Submit the highest valid payment check to close the channel cooperatively (Section 3.2.6).
+2. If cooperative close is not possible (e.g., connection lost), the Leecher can force-close after timeout.
+3. Discard the session state (channel tracking, usage counters).
+4. Delete the ephemeral secret key (ensures forward secrecy).
 
-#### 3.4.4 Interaction with Ratio Credits
+The Seeder MAY continue to serve as a free seeder (if its local policy allows) or close the connection.
 
-If the Seeder's handshake advertised `accepts_ratio = true`, the client MAY combine balance checks with a separate ratio credit check instead of strict "balance or nothing" behavior:
+#### 3.4.5 Interaction with Ratio Credits
 
-- If `prepaid_balance` is exhausted but the Leecher presents valid ratio credits, the Seeder may continue serving pieces and decrement ratio credits instead of token balance.
+If the Seeder's handshake advertised `accepts_ratio = true`, the client MAY combine payment checks with a separate ratio credit check instead of strict "payment check or nothing" behavior:
+
+- If the payment channel deposit is exhausted but the Leecher presents valid ratio credits, the Seeder may continue serving pieces and decrement ratio credits instead of requiring new payment checks.
 
 This design allows the same Data Transfer Phase to handle pure paid sessions, pure ratio-based sessions, or hybrid sessions without modifying the underlying BitTorrent wire protocol.
 
@@ -611,9 +864,155 @@ The ephemeral session key design provides the following privacy properties:
 
 _[Draft/TBD - How to prevent peer_id spoofing, Sybil attacks in ratio credit system]_
 
-### 5.4 Economic Attacks
+### 5.4 Economic Attacks and Mitigations
 
-_[Draft/TBD - Mitigations for payment fraud, griefing attacks, etc.]_
+#### 5.4.1 Maximum Loss Per Session
+
+The payment channel design limits the maximum loss for both parties:
+
+**For Leecher:**
+
+- Maximum loss: Amount deposited in channel (e.g., 0.01 USDC)
+- Occurs if: Seeder sends no data after channel opening
+- Mitigation: Leecher can force-close after timeout to recover funds
+
+**For Seeder:**
+
+- Maximum loss: $0 (Seeder only serves data after verifying channel on-chain)
+- Occurs if: Leecher stops sending payment checks mid-download
+- Mitigation: Seeder stops serving data when payment checks stop
+
+#### 5.4.2 Griefing Attacks
+
+**Attack: Leecher Opens Channel But Never Downloads**
+
+Scenario:
+
+1. Leecher opens payment channel (locks 0.01 USDC)
+2. Leecher never requests any pieces
+3. Seeder's capital is not at risk, but channel occupies contract state
+
+Mitigation:
+
+- Channels can be force-closed by Leecher after timeout
+- Seeder can set `min_prepayment` high enough to deter spam
+- Smart contract can charge a small creation fee to prevent spam
+
+**Attack: Leecher Requests Data But Sends No Payment Checks**
+
+Scenario:
+
+1. Leecher opens valid channel
+2. Leecher requests pieces but never sends payment checks
+3. Seeder serves 1-2 pieces before realizing no payment is coming
+
+Mitigation:
+
+- Seeder requires first payment check before sending ANY data
+- Or, Seeder sends 1 piece, then waits for payment check before continuing
+- Maximum loss: Cost of 1 piece (~$0.000025)
+
+**Attack: Seeder Sends Corrupted Data**
+
+Scenario:
+
+1. Seeder sends corrupted piece
+2. Leecher detects corruption via BitTorrent hash verification
+3. Leecher stops sending payment checks
+
+Result:
+
+- Seeder earned: Payment for pieces sent before corruption
+- Leecher lost: Payment for corrupted piece only
+- Maximum loss: Cost of 1 corrupted piece (~$0.000025)
+
+Mitigation:
+
+- Built into protocol: Leecher verifies piece hashes before signing checks
+- Leecher can disconnect and use remaining channel balance with another seeder
+
+#### 5.4.3 Sybil Attacks on Payment Channels
+
+**Attack: Malicious Seeder Creates Many Identities**
+
+Scenario:
+
+1. Attacker creates 100 Seeder wallets
+2. Advertises content but sends garbage data
+3. Each Seeder scams 1 Leecher per day
+
+Analysis:
+
+- Cost to Leecher per scam: 1 piece = $0.000025
+- Attacker gain: $0.000025 per scam = $0.0025/day for 100 seeders
+- Not economically rational
+
+**Attack: Leecher Opens Many Channels, Never Closes**
+
+Scenario:
+
+1. Leecher opens 1000 channels with different Seeders
+2. Deposits $0.01 each = $10 total locked
+3. Leecher disappears, never closes channels
+
+Impact:
+
+- Leecher loses: $10 (funds locked until timeout)
+- Seeders lose: $0 (no cost to Seeders)
+- Blockchain state: 1000 open channels (contract storage cost)
+
+Mitigation:
+
+- Channels auto-close after timeout (Leecher can force-close)
+- Smart contract can implement storage rent (chain-specific feature)
+- Max timeout of 7 days limits lock duration
+
+#### 5.4.4 Front-Running Attacks
+
+**Attack: Seeder Front-Runs Channel Close**
+
+Scenario:
+
+1. Leecher broadcasts timeout_close() transaction
+2. Seeder sees it in mempool
+3. Seeder front-runs with close_channel() using an old, low payment check
+
+Analysis:
+
+- Seeder cannot front-run with lower amount than Leecher already signed
+- Contract enforces monotonically increasing amounts
+- Even if Seeder front-runs, they can only claim what Leecher authorized
+
+Result: Attack ineffective, protocol is front-run resistant
+
+#### 5.4.5 Replay Attacks
+
+**Attack: Seeder Reuses Old Payment Check**
+
+Scenario:
+
+1. Leecher signs check #5 (amount: 0.005)
+2. Later, Leecher signs check #10 (amount: 0.01)
+3. Seeder tries to close with check #5 (to keep more funds)
+
+Mitigation:
+
+- Smart contract tracks `last_nonce`
+- Only accepts checks with nonce > last_nonce
+- Cannot replay old checks
+
+**Attack: Seeder Reuses Payment Check Across Sessions**
+
+Scenario:
+
+1. Session A: Leecher signs check for channel A
+2. Session B: Seeder tries to use same check for channel B
+
+Mitigation:
+
+- Payment check includes channel_id in signed message
+- Check is only valid for specific channel
+- Cannot replay across channels
 
 ## 6. Implementation Notes
 
@@ -641,13 +1040,139 @@ _[Draft/TBD - Mitigations for payment fraud, griefing attacks, etc.]_
 
 ### 6.2 Blockchain Integration
 
-_[Draft/TBD - Specific implementation details for Solana integration, transaction construction, RPC usage]_
+#### 6.2.1 Smart Contract Requirements
 
-**Solana Specifics:**
+The payment channel MUST be implemented as a smart contract (or program) on the target blockchain. The contract MUST provide the following functions:
 
-- Use SPL Token program for USDC transfers
-- Memo program for attaching JSON memo
-- Target confirmation level: "confirmed" minimum, "finalized" recommended
+**Required Functions:**
+
+1. **open_channel**: Creates a new payment channel
+
+   - Parameters: `leecher`, `seeder`, `deposit_amount`, `timeout_period`, `channel_id`, `memo`
+   - Actions:
+     - Transfers tokens from Leecher to escrow account
+     - Creates channel state record
+     - Stores channel metadata
+   - Returns: Transaction signature
+
+2. **close_channel**: Closes channel with final payment check (cooperative close)
+
+   - Parameters: `channel_id`, `amount`, `nonce`, `signature`
+   - Actions:
+     - Verifies payment check signature
+     - Verifies nonce > last_nonce
+     - Transfers `amount` to Seeder
+     - Refunds `deposited - amount` to Leecher
+     - Marks channel as closed
+   - Returns: Transaction signature
+
+3. **timeout_close**: Closes channel after timeout (force-close by Leecher)
+   - Parameters: `channel_id`
+   - Actions:
+     - Verifies current time > channel.timeout
+     - Refunds entire deposit to Leecher
+     - Marks channel as timed out
+   - Returns: Transaction signature
+
+**Account/State Structure:**
+
+The smart contract MUST maintain channel state with the structure defined in Section 3.3.2. The contract MUST use deterministic account addressing (e.g., Program Derived Addresses on Solana, CREATE2 on Ethereum) to ensure channel accounts can be computed from channel parameters.
+
+**Transaction Construction:**
+
+For opening a channel:
+
+```
+transaction = {
+  instructions: [
+    token_transfer(leecher -> escrow, amount),
+    create_channel_state(
+      leecher: leecher_wallet,
+      seeder: seeder_wallet,
+      escrow: escrow_account,
+      deposited: amount,
+      channel_id: channel_id,
+      created_at: current_timestamp,
+      timeout: current_timestamp + timeout_period,
+      last_nonce: 0,
+      status: "Open"
+    ),
+    attach_memo({
+      protocol: "seedpay",
+      version: "1.0",
+      session_hash: session_hash,
+      nonce: nonce
+    })
+  ],
+  signers: [leecher_private_key]
+}
+```
+
+#### 6.2.2 Token Program Requirements
+
+The blockchain MUST support:
+
+- Token transfers (fungible tokens, e.g., USDC)
+- Escrow accounts controlled by smart contracts
+- Memo/note attachment to transactions
+
+**Token Standards:**
+
+- Solana: SPL Token program
+- Ethereum/EVM: ERC-20 tokens
+- Other chains: Equivalent fungible token standard
+
+#### 6.2.3 RPC Provider Requirements
+
+For production Seeders, use dedicated RPC providers with sufficient rate limits:
+
+**Minimum Requirements:**
+
+- Read operations: At least 10 requests/second
+- Write operations: At least 5 transactions/second
+- Confirmation time: < 5 seconds for "confirmed" status
+
+**Recommended Providers:**
+
+- Use dedicated RPC providers (not public free-tier)
+- Implement retry logic with exponential backoff
+- Cache channel state to reduce RPC calls
+
+**RPC Operations Required:**
+
+1. **Channel Opening Verification:**
+
+   - Fetch transaction by signature
+   - Parse channel creation instruction
+   - Verify channel state on-chain
+   - Cost: 1 RPC call per channel
+
+2. **Channel Closing:**
+
+   - Submit close_channel or timeout_close transaction
+   - Wait for confirmation
+   - Cost: 1 RPC call per close
+
+3. **Payment Check Validation:**
+   - Validated off-chain (no RPC calls needed)
+   - Only requires on-chain verification when closing channel
+
+#### 6.2.4 Confirmation Requirements
+
+**Channel Opening:**
+
+- MUST wait for at least "confirmed" status before proceeding
+- RECOMMENDED to wait for "finalized" status for production use
+
+**Channel Closing:**
+
+- MUST wait for at least "confirmed" status
+- RECOMMENDED to wait for "finalized" status before considering funds received
+
+**Confirmation Levels:**
+
+- "Confirmed": Transaction included in block, may be reverted
+- "Finalized": Transaction cannot be reverted (chain-specific, e.g., Solana finality, Ethereum finality)
 
 ### 6.3 Client Compatibility
 
@@ -671,11 +1196,137 @@ _[Draft/TBD - How to implement SeedPay as a BitTorrent client extension, backwar
 
 - Solana public RPCs: ~10 req/sec
 - Recommended: use dedicated RPC provider for production Seeders
-- Payment verification requires 1 RPC call per payment proof
+- Channel opening verification requires 1 RPC call per channel
+- Channel closing requires 1 RPC call (cooperative close) or 1 RPC call + wait for timeout (force close)
+- Payment checks are validated off-chain (no RPC calls needed during data transfer)
 
 ### 6.5 Error Handling
 
-_[Draft/TBD - Common failure modes, retry strategies, connection recovery]_
+#### 6.5.1 Connection Drops Mid-Session
+
+**Scenario:** TCP connection is lost during data transfer.
+
+**Leecher Behavior:**
+
+- If connection drops before sending final payment check:
+  - Leecher can reconnect and continue with same channel (if channel still open)
+  - Or, Leecher can force-close channel after timeout to recover unspent deposit
+- If connection drops after sending payment check:
+  - Seeder may have already received check and can close channel
+  - Leecher should monitor channel state to verify final settlement
+
+**Seeder Behavior:**
+
+- If connection drops before receiving final payment check:
+  - Seeder should attempt to close channel with highest received check
+  - If no valid check received, Seeder cannot claim funds (Leecher will timeout close)
+- If connection drops after receiving payment check:
+  - Seeder should close channel immediately with received check
+  - Seeder should not wait for reconnection
+
+#### 6.5.2 RPC Failures During Channel Verification
+
+**Scenario:** RPC endpoint is unavailable or returns error when verifying channel.
+
+**Retry Strategy:**
+
+- Implement exponential backoff: 1s, 2s, 4s, 8s, 16s
+- Maximum retries: 5 attempts
+- After max retries: Reject channel and keep Leecher choked
+
+**Fallback:**
+
+- Seeder can maintain list of trusted RPC providers
+- Switch to backup RPC provider if primary fails
+- Cache recent channel verifications to reduce RPC dependency
+
+#### 6.5.3 Invalid Payment Check Handling
+
+**Scenario:** Seeder receives payment check with invalid signature or stale nonce.
+
+**Validation Failures:**
+
+- Invalid signature: Reject check, send error message, keep Leecher choked
+- Stale nonce: Reject check, send error with expected nonce, keep Leecher choked
+- Amount exceeds deposit: Reject check, send error, keep Leecher choked
+- Amount not monotonically increasing: Reject check, send error, keep Leecher choked
+
+**Error Message Format:**
+
+```json
+{
+  "type": "payment_check_rejected",
+  "channel_id": "<channel_identifier>",
+  "reason": "invalid_signature" | "stale_nonce" | "amount_exceeds_deposit" | "amount_not_increasing",
+  "expected_nonce": 5,
+  "received_nonce": 3
+}
+```
+
+#### 6.5.4 Channel Timeout Edge Cases
+
+**Scenario:** Channel timeout approaches while download is still in progress.
+
+**Leecher Behavior:**
+
+- Monitor channel timeout (e.g., check every 10 minutes)
+- If timeout approaching (< 1 hour remaining) and download incomplete:
+  - Option 1: Open new channel and continue download
+  - Option 2: Extend timeout (if supported by contract)
+  - Option 3: Force-close and recover funds
+
+**Seeder Behavior:**
+
+- Monitor channel timeout for active sessions
+- If timeout approaching and download incomplete:
+  - Send warning message to Leecher
+  - Request new channel or timeout extension
+  - If no response, prepare to close channel with highest check
+
+**Timeout Warning Message:**
+
+```json
+{
+  "type": "channel_timeout_warning",
+  "channel_id": "<channel_identifier>",
+  "timeout_in_seconds": 3600,
+  "recommended_action": "open_new_channel" | "extend_timeout"
+}
+```
+
+#### 6.5.5 Transaction Failures
+
+**Scenario:** Channel opening or closing transaction fails on-chain.
+
+**Channel Opening Failure:**
+
+- Leecher should retry with new nonce (to avoid replay)
+- If repeated failures: Check network conditions, increase gas/fee if applicable
+- Maximum retries: 3 attempts before giving up
+
+**Channel Closing Failure:**
+
+- Seeder (cooperative close): Retry with same payment check
+- Leecher (timeout close): Retry with same channel_id
+- If repeated failures: May indicate network congestion, wait and retry later
+
+#### 6.5.6 Recovery Procedures
+
+**Leecher Recovery:**
+
+1. On startup, scan for open channels associated with wallet
+2. For each open channel:
+   - Check if timeout has passed
+   - If timed out: Force-close to recover funds
+   - If not timed out: Check if download can continue or should be abandoned
+
+**Seeder Recovery:**
+
+1. On startup, scan for open channels where this wallet is the seeder
+2. For each open channel:
+   - Check if valid payment checks were received
+   - If valid checks exist: Close channel to claim funds
+   - If no valid checks: Channel will timeout, no action needed
 
 ## 7. Future Extensions
 
@@ -691,16 +1342,46 @@ The ECDH-based session binding is chain-agnostic and can be implemented on:
 
 ### 7.2 Advanced Payment Models
 
-**Payment Channels (V2+):**
+**Payment Channels (V1):**
 
-- For high-frequency micropayments (1000+ payments per session)
-- Reduces on-chain footprint to 2 transactions (open/close)
-- Uses same ECDH session binding for off-chain state
+- Currently implemented in V0.2
+- Enables streaming micropayments with off-chain payment checks
+- Reduces on-chain footprint to 2 transactions per session (open/close)
+- Uses ECDH session binding for privacy
+
+**Why Unidirectional Channels for V1:**
+
+SeedPay V1 uses unidirectional channels (Leecher → Seeder only) because:
+
+- Seeders earn, Leechers pay (one direction of value flow)
+- Simpler state management (no need for both parties to sign updates)
+- Lower risk (only Leecher's deposit is at risk)
+- Sufficient for core use case of paid file downloads
+
+Bidirectional channels would be useful for:
+
+- Ratio credit transfers (Seeder → Leecher)
+- Refunds or disputes
+- Will be considered for V2 if ratio credit system requires it
+
+**Future Payment Models:**
+
+**Bidirectional Payment Channels:**
+
+- Allow both parties to send payments (for ratio credit transfers)
+- More complex state management, requires both parties to sign updates
 
 **Probabilistic Payments:**
 
 - Lottery-style micropayments for extreme scalability
 - Trade certainty for reduced transaction count
+- Useful for very high-frequency, low-value transactions
+
+**Multi-Hop Payment Routing:**
+
+- Allow payments through intermediate nodes
+- Enables payment channel networks (similar to Lightning Network)
+- Requires routing protocol and liquidity management
 
 ### 7.3 Reputation Systems
 
@@ -730,7 +1411,7 @@ _[Draft/TBD - Seeder reputation, leecher trust scores]_
 
 **Changelog:**
 
-- **v0.2 (2024-12-20)**: Introduced ECDH-based ephemeral session keys for privacy, removed peer_id from on-chain memos, simplified payment model (no channels for V1)
+- **v0.2 (2024-12-21)**: Introduced ECDH-based ephemeral session keys for privacy, removed peer_id from on-chain memos, implemented unidirectional payment channels with off-chain payment checks for streaming micropayments
 - **v0.1 (2024-12-15)**: Initial draft with peer_id-based memo binding (deprecated due to privacy concerns)
 
 ---
