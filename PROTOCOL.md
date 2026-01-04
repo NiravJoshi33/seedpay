@@ -2,19 +2,19 @@
 
 # SeedPay: Payments Protocol for BitTorrent Networks
 
-## Seeders earn crypto for sharing files. Leechers pay for faster downloads or earn credits by seeding.
+## Seeders earn crypto for sharing files. Leechers pay for faster downloads.
 
 </div>
 
 > ⚠️ **Status: Pre-Alpha / Request For Comments (RFC)**
 >
-> This specification is **v0.2 draft** incorporating privacy protections based on community feedback.
+> This specification is **v0.3 draft** incorporating privacy protections and simplified payment model based on community feedback.
 >
-> **What's New in v0.2:**
+> **What's New in v0.3:**
 >
 > 1. **Privacy Protection Implemented**: Ephemeral Session Keys (ECDH-based) replace raw PeerIDs in on-chain memos, preventing linkage between IP addresses and wallet addresses.
-> 2. **Simplified Payment Model**: Payment channels with streaming micropayments for V1.
-> 3. **Ratio Credits (TBD)**: System redesign in progress to prevent Sybil attacks and ensure fairness.
+> 2. **Payment Channels**: Unidirectional payment channels with streaming micropayments enable fair exchange and low transaction costs.
+> 3. **Simplified Protocol**: Focus on crypto-native users with direct payments. Ratio credits system dropped in favor of simpler implementation.
 >
 > **This is research software. Do not use in production.**
 >
@@ -22,11 +22,13 @@
 
 ## Abstract
 
-SeedPay is an open payment protocol that enables BitTorrent seeders to earn cryptocurrency for sharing files, while giving leechers two paths for accessing the content: pay seeders directly with stablecoins (e.g. USDC), or earn ratio credits by seeding other torrents.
+SeedPay is an open payment protocol that enables BitTorrent seeders to earn cryptocurrency for sharing files, while leechers pay seeders directly with stablecoins (e.g. USDC) for faster downloads and guaranteed availability.
 
-By extending the BitTorrent Wire Protocol with payment handshakes and blockchain-verified proofs, SeedPay solves the free-rider problem without requiring centralized infrastructure or breaking compatibility with existing clients.
+By extending the BitTorrent Wire Protocol with payment handshakes and blockchain-verified payment channels, SeedPay solves the free-rider problem without requiring centralized infrastructure or breaking compatibility with existing clients.
 
-The protocol supports micropayments as low as $0.0001/MB with near-instant settlement, backward compatibility with standard BitTorrent, and optional participation. **V0.2 introduces ephemeral session keys to ensure payment privacy—blockchain observers cannot link wallet addresses to download activity.**
+The protocol supports micropayments as low as $0.0001/MB with near-instant settlement, backward compatibility with standard BitTorrent, and optional participation. **V0.3 introduces ephemeral session keys to ensure payment privacy—blockchain observers cannot link wallet addresses to download activity.**
+
+**Target Users:** Crypto-native users who value speed, availability, and supporting content creators. Non-crypto users can continue using standard BitTorrent (free tier).
 
 ## 1. Motivation
 
@@ -64,32 +66,42 @@ BitTorrent's success depends on users seeding (uploading) files after downloadin
 
 ### How SeedPay Solves This
 
-SeedPay provides **direct economic incentives** for seeding through two mechanisms:
+SeedPay provides **direct economic incentives** for seeding through micropayments:
 
-1. **Micropayments**: Leechers pay seeders in stablecoins
-   ($0.0001-$0.001/MB typical)
-2. **Ratio credits**: Leechers earn credits by seeding, spend them
-   to download from paid seeders
+1. **Micropayments**: Leechers pay seeders in stablecoins (e.g. USDC)
+   - Typical pricing: $0.0001-$0.001/MB
+   - Payment channels enable streaming micropayments with minimal on-chain costs
+   - Seeders earn real cryptocurrency for providing bandwidth
 
-This dual model:
+This model:
 
-- Incentivizes seeding after download completion
-- Works for both crypto-native and traditional users
-- No centralized infrastructure required
-- Backward compatible with existing clients
+- Incentivizes seeding after download completion (seeders earn money)
+- Enables long-tail content to stay available (economic incentive to seed)
+- Works for crypto-native users who value speed and availability
+- No centralized infrastructure required (blockchain-based)
+- Backward compatible with existing clients (opt-in payments)
+- Users can earn USDC by seeding, then spend it on downloads (circular economy)
 
 ## 2. Protocol Overview
 
 ### 2.1 Roles
 
-- **Leecher**: Downloads files, pays with crypto or ratio credits
-- **Seeder**: Uploads files, earns crypto or ratio credits
+- **Leecher**: Downloads files, pays seeders with cryptocurrency (e.g. USDC)
+- **Seeder**: Uploads files, earns cryptocurrency from leechers
 
-### 2.2 Dual Participation Model
+### 2.2 Participation Model
 
-In SeedPay, Leecher has two paths for accessing the content from the paid Seeder. Either by directly paying the cryptocurrency or by using its ratio credits earned by seeding other content.
+In SeedPay, Leechers pay Seeders directly with cryptocurrency via payment channels. The opt-in nature of payments means:
 
-The opt-in nature of payments flow allows well-behaved actors to get access to faster download speeds through paid seeders without paying them.
+- **Free Tier**: Standard BitTorrent continues to work (free seeders, tit-for-tat)
+- **Paid Tier**: SeedPay-enabled clients can pay for faster speeds and guaranteed availability
+
+Users can participate in both directions:
+
+- **Earn**: Seed files and receive payments from leechers
+- **Spend**: Pay seeders to download files quickly
+
+This creates a circular economy: users can earn USDC by seeding, then spend it on downloads, all within the same payment system.
 
 ### 2.3 Design Principles
 
@@ -97,7 +109,7 @@ The opt-in nature of payments flow allows well-behaved actors to get access to f
 - Opt-in (No forced payments)
 - Blockchain-agnostic (Solana first, extensible)
 - Minimal trust required
-- **Privacy-preserving** (v0.2): On-chain payments cannot be linked to download activity
+- **Privacy-preserving** (v0.3): On-chain payments cannot be linked to download activity
 
 ## 3. Core Protocol Flow
 
@@ -135,11 +147,10 @@ SeedPay defines a new extension named "seedpay". A Seeder that supports paid see
     "seedpay": 5,
     "ut_metadata": 2
   },
-  "v": "SeedPayClient 0.2",
+  "v": "SeedPayClient 0.3",
   "seedpay": {
     "wallet": "DYw8jCN...",
     "price_per_mb": 0.0001,
-    "accepts_ratio": 1,
     "min_prepayment": 0.01,
     "chain": "solana"
   }
@@ -150,7 +161,6 @@ SeedPay defines a new extension named "seedpay". A Seeder that supports paid see
 - The nested `seedpay` dictionary contains the Seeder's payment capabilities:
   - `wallet`: seeder's on-chain wallet address for receiving payments
   - `price_per_mb`: quoted price in USDC per MB
-  - `accepts_ratio`: whether this peer accepts ratio credits instead of payments
   - `min_prepayment`: minimum amount required to start a paid session
   - `chain`: identifier of the settlement chain (e.g. `"solana"`)
 
@@ -161,7 +171,7 @@ A Leecher that supports SeedPay should also include `seedpay` in its `m` map:
   "m": {
     "seedpay": 3
   },
-  "v": "SeedPayClient 0.2"
+  "v": "SeedPayClient 0.3"
 }
 ```
 
@@ -169,33 +179,33 @@ After both extended handshakes are exchanged, each peer:
 
 - checks whether the remote `m` contains `"seedpay"`
 - records the remote extension id for `"seedpay"`
-- parses the remote `seedpay` object (if present) to learn the counterparty's wallet, pricing, and ratio policy.
+- parses the remote `seedpay` object (if present) to learn the counterparty's wallet and pricing
 
 If either side's extended handshake does not include `"seedpay"` in `m`, the connection continues as a normal BitTorrent session without payments.
 
 #### 3.1.3 SeedPay Capability Detection
 
-From the Leecher's perspective, the handshake phase answers two questions:
+From the Leecher's perspective, the handshake phase answers:
 
 1. Does this peer support SeedPay?
 
    - Yes, if `"seedpay"` is present in remote `m` map
 
-2. What options are available?
-   - If `seedpay.price_per_mb` is set → peer supports paid seeding.
-   - If `seedpay.accepts_ratio` is true → peer will also accept ratio credits.
+2. What are the payment terms?
+   - If `seedpay.price_per_mb` is set → peer supports paid seeding
+   - `seedpay.wallet` → where to send payments
+   - `seedpay.min_prepayment` → minimum channel deposit required
 
-Based on this information the Leechers classifies the peer as:
+Based on this information the Leecher classifies the peer as:
 
-- Free-only (No `seedpay` entry)
-- Paid seeder (SeedPay with pricing, no ratio)
-- Hybrid seeder (SeedPay with both pricing and ratio support)
+- Free-only (No `seedpay` entry) → standard BitTorrent behavior
+- Paid seeder (SeedPay with pricing) → can open payment channel to download
 
 Only after this handshake phase completes does the protocol move into the Payment Channel Phase, where Leechers establish ephemeral session keys and open payment channels for streaming micropayments.
 
 ### 3.2 Payment Channel Setup
 
-Once the handshake phase is complete and the Leecher has discovered a Seeder advertising SeedPay support, the next step is to establish a cryptographically-bound payment channel. **V0.2 uses Ephemeral Session Keys to ensure privacy**—the on-chain channel opening contains no peer_id or IP address information that could link wallet activity to download behavior.
+Once the handshake phase is complete and the Leecher has discovered a Seeder advertising SeedPay support, the next step is to establish a cryptographically-bound payment channel. **V0.3 uses Ephemeral Session Keys to ensure privacy**—the on-chain channel opening contains no peer_id or IP address information that could link wallet activity to download behavior.
 
 Payment channels enable streaming micropayments: the Leecher deposits funds into an escrow account, then signs off-chain payment checks as data is downloaded. The Seeder can submit the final check to claim funds, or the Leecher can close the channel after a timeout period.
 
@@ -280,7 +290,7 @@ The Leecher may also apply local policy, such as:
 
 - Maximum price per MB it is willing to pay
 - Maximum total spend per torrent per session
-- Preference for using ratio credits instead of payment when available
+- Minimum acceptable channel timeout period
 
 If the Seeder's advertised terms are acceptable, the Leecher computes an initial channel deposit amount large enough to cover some target amount of data (for example, 50–200 MB), but at least `min_prepayment`.
 
@@ -774,45 +784,66 @@ When a session ends (either normally or due to expiry), the Seeder SHOULD:
 
 The Seeder MAY continue to serve as a free seeder (if its local policy allows) or close the connection.
 
-#### 3.4.5 Interaction with Ratio Credits
+## 4. Circular Economy and Future Extensions
 
-If the Seeder's handshake advertised `accepts_ratio = true`, the client MAY combine payment checks with a separate ratio credit check instead of strict "payment check or nothing" behavior:
+### 4.1 Status
 
-- If the payment channel deposit is exhausted but the Leecher presents valid ratio credits, the Seeder may continue serving pieces and decrement ratio credits instead of requiring new payment checks.
+**Ratio credits are DEFERRED to V2.** V1 focuses on direct payments via payment channels only.
 
-This design allows the same Data Transfer Phase to handle pure paid sessions, pure ratio-based sessions, or hybrid sessions without modifying the underlying BitTorrent wire protocol.
+**Rationale:**
 
-## 4. Ratio Credits System
+- Keeps protocol simple and auditable
+- Faster time to market
+- Payment channels already enable circular economy (earn USDC by seeding, spend on downloading)
+- Focus on crypto-native users who value speed and availability
+- Can add ratio credits in V2 based on user feedback and real-world usage data
 
-### 4.1 Overview
+### 4.2 Earning USDC by Seeding
 
-_[Draft/TBD - This section will detail the ratio credits mechanism]_
+Users who don't want to add funds can still participate in the circular economy:
 
-Ratio credits allow leechers to earn access to paid seeders by seeding other torrents, creating a circular economy within the SeedPay network.
+1. **Seed popular content** using SeedPay-enabled client
+2. **Earn USDC** from leechers who pay for downloads
+3. **Use earned USDC** to download from paid seeders
 
-**Design Challenges Being Addressed:**
+This creates the same circular economy without requiring a separate credit system. Users can:
+
+- Start by adding funds (buy USDC) for immediate access
+- Offset costs by seeding and earning USDC
+- Eventually become net earners if they seed more than they download
+
+**Example Flow:**
+
+```
+User A: Seeds 10GB → Earns 0.1 USDC
+User A: Downloads 5GB → Spends 0.05 USDC
+Result: User A has 0.05 USDC remaining (net earner)
+```
+
+### 4.3 Future Considerations for V2
+
+V2 MAY add ratio credits if user research indicates:
+
+- Strong demand for non-monetary credits (separate from USDC)
+- Need for better privacy (credits vs direct payments)
+- Anti-Sybil mechanisms that credits can provide
+- Demand from non-crypto users who refuse to touch cryptocurrency
+
+**Design Challenges for V2 (if pursued):**
 
 - Preventing Sybil attacks (users farming credits with fake seeders)
 - Ensuring credits have real value (tied to actual bandwidth provision)
 - Cross-torrent credit portability
+- On-chain vs off-chain credit ledger
+- Credit verification mechanisms
 
-### 4.2 Credit Earning
-
-_[Draft/TBD - How leechers earn credits by seeding]_
-
-### 4.3 Credit Spending
-
-_[Draft/TBD - How credits are spent and verified]_
-
-### 4.4 Credit Transfer and Verification
-
-_[Draft/TBD - On-chain or off-chain credit ledger, verification mechanisms]_
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to provide input on V2 features.
 
 ## 5. Security Considerations
 
 ### 5.1 Privacy Model
 
-**V0.2 Privacy Guarantees:**
+**V0.3 Privacy Guarantees:**
 
 The ephemeral session key design provides the following privacy properties:
 
@@ -862,7 +893,19 @@ The ephemeral session key design provides the following privacy properties:
 
 ### 5.3 Peer Authentication
 
-_[Draft/TBD - How to prevent peer_id spoofing, Sybil attacks in ratio credit system]_
+_[Draft/TBD - How to prevent peer_id spoofing, Sybil attacks]_
+
+**Current V1 Approach:**
+
+- Payment channels require real cryptocurrency deposits
+- Sybil attacks are economically unfeasible (attacker must deposit real funds)
+- Each channel opening costs transaction fees, limiting spam
+
+**Future Considerations:**
+
+- Reputation systems for seeders (based on successful channel closes)
+- Rate limiting for channel creation per wallet
+- Proof-of-bandwidth mechanisms if needed
 
 ### 5.4 Economic Attacks and Mitigations
 
@@ -1180,7 +1223,7 @@ _[Draft/TBD - How to implement SeedPay as a BitTorrent client extension, backwar
 
 **MSE (Message Stream Encryption) Requirement:**
 
-- SeedPay V0.2 REQUIRES MSE for ECDH key exchange
+- SeedPay V0.3 REQUIRES MSE for ECDH key exchange
 - Clients MUST implement BEP 52 (MSE) to support SeedPay payments
 - Fallback to unencrypted mode is NOT supported for payment sessions
 
@@ -1344,7 +1387,7 @@ The ECDH-based session binding is chain-agnostic and can be implemented on:
 
 **Payment Channels (V1):**
 
-- Currently implemented in V0.2
+- Currently implemented in V0.3
 - Enables streaming micropayments with off-chain payment checks
 - Reduces on-chain footprint to 2 transactions per session (open/close)
 - Uses ECDH session binding for privacy
@@ -1360,15 +1403,15 @@ SeedPay V1 uses unidirectional channels (Leecher → Seeder only) because:
 
 Bidirectional channels would be useful for:
 
-- Ratio credit transfers (Seeder → Leecher)
 - Refunds or disputes
-- Will be considered for V2 if ratio credit system requires it
+- Two-way value exchange (if needed in future)
+- Will be considered for V2 if use cases emerge
 
 **Future Payment Models:**
 
 **Bidirectional Payment Channels:**
 
-- Allow both parties to send payments (for ratio credit transfers)
+- Allow both parties to send payments
 - More complex state management, requires both parties to sign updates
 
 **Probabilistic Payments:**
@@ -1411,8 +1454,9 @@ _[Draft/TBD - Seeder reputation, leecher trust scores]_
 
 **Changelog:**
 
-- **v0.2 (2024-12-21)**: Introduced ECDH-based ephemeral session keys for privacy, removed peer_id from on-chain memos, implemented unidirectional payment channels with off-chain payment checks for streaming micropayments
-- **v0.1 (2024-12-15)**: Initial draft with peer_id-based memo binding (deprecated due to privacy concerns)
+- **v0.3 (2026-01-04)**: Dropped ratio credits system in favor of simplified protocol focused on crypto-native users. Protocol now uses direct payments via payment channels only. Users can still participate in circular economy by earning USDC through seeding and spending it on downloads.
+- **v0.2 (2025-12-21)**: Introduced ECDH-based ephemeral session keys for privacy, removed peer_id from on-chain memos, implemented unidirectional payment channels with off-chain payment checks for streaming micropayments
+- **v0.1 (2025-12-15)**: Initial draft with peer_id-based memo binding (deprecated due to privacy concerns)
 
 ---
 
